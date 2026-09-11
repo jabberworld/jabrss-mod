@@ -245,7 +245,7 @@ CLI-опции: `-c/--config`, `-f/--password-file` (пароль из перв�
 
 - Если `type` пуст или `body` пуст — игнор. Логирует.
 - `sender.user == ''` (доменный адрес) — игнор.
-- типы `normal`/`chat`: требуют существующего `get_user` (иначе `KeyError` → traceback). Диспетчер команд по префиксам (`help`/`?`, `list`, `set `, `configuration`/`conf`, `stats`/`statistics`/`show statistics`, `usage`/`show usage`, `subscribe `/`add `/`+ `, `unsubscribe `/`del `/`- `, `info `). Неизвестная команда → не более 2 предупреждений на пользователя (защита от пинг-понга роботов).
+- типы `normal`/`chat`: сначала `get_user`; при `KeyError` — fallback на `load_user(sender, None)` (загрузка из БД, без создания нового). Если пользователь не найден (`None`) — выход. Диспетчер команд по префиксам (`help`/`?`, `list`, `set `, `configuration`/`conf`, `stats`/`statistics`/`show statistics`, `usage`/`show usage`, `subscribe `/`add `/`+ `, `unsubscribe `/`del `/`- `, `info `). Неизвестная команда → не более 2 предупреждений на пользователя (защита от пинг-понга роботов).
 - тип `headline` — молча игнор (чтобы не отвечать на собственные headline-сообщения).
 - тип `error` / прочие — игнор с логированием.
 

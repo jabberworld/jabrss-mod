@@ -28,7 +28,7 @@ JabRSS is an XMPP-based RSS/Atom feed aggregator and notification bot. It monito
 | `jabrssng.py` | Facade/entry point: parses config, initialises the context, builds `JabRSSStream`, starts the XMPP loop and the updater/console threads, and runs the shutdown sequence. Also re-exports `Cursor`, `FlexibleLocker`, `JabRSSStream`, `JabberUser`, `get_db`, `ensure_databases` for the offline test suite. Importing it is side-effect free (`main()` does all the work). |
 | `jabrssng_stream.py` | `JabRSSStream` (composed from the mixins below + `slixmpp.ClientXMPP`): connection/SRV resolution, auth, reconnects, keepalive, IQ fallbacks (`jabber:iq:time`/`last`/`urn:xmpp:time`), `session_start` and presence status. |
 | `jabrssng_commands.py` | `ChatCommandMixin`: the user-facing commands (`help`, `list`, `set`, `configuration`, `statistics`, `usage`, `subscribe`, `unsubscribe`, `info`). |
-| `jabrssng_delivery.py` | `DeliveryMixin`: the `message`/`presence` stub handlers, subscription presence flows, `_send_headlines` message formatting (plaintext/chat/headline + OOB). |
+| `jabrssng_delivery.py` | `DeliveryMixin`: the `message`/`presence` stub handlers (message falls back to `load_user` when `get_user` cache-misses), subscription presence flows, `_send_headlines` message formatting (plaintext/chat/headline + OOB). |
 | `jabrssng_roster.py` | `RosterMixin`: server-roster reconciliation (`roster_update_event`), user deletion incl. the removal grace period (`_delete_user_after_grace`). |
 | `jabrssng_updater.py` | `UpdaterMixin`: the feed-polling update queue (`schedule_update`, `run`, `_update_resource`), running in a separate thread. |
 | `jabrssng_user.py` | `JabberUser` / `DummyJabberUser` entity, `strip_resource`, `get_week_nr`. |
