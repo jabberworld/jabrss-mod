@@ -1,0 +1,47 @@
+# JabRSS bot configuration -- example/template
+# --------------------------------------------
+# Copy this file to "jabrss.conf" and adjust the values. By default the
+# bot reads "jabrss.conf" from the directory of jabrssng.py; the -c /
+# --config option selects a different file.
+#
+# The file uses the INI format with a single [jabrss] section. Options
+# are resolved with the precedence: command line > config file >
+# interactive prompt. A value that is neither provided on the command
+# line nor in this file is asked for interactively and then saved back
+# to the config file (which is created with mode 0600 if it does not
+# exist yet).
+#
+# Instead of the "password" key you can pass the password on the
+# command line (-p) or read it from a file (-f); "jid" is always
+# required.
+#
+# Available keys in the [jabrss] section:
+#   jid        -- XMPP account of the bot (required)
+#   password   -- password of that account (required)
+#   host       -- XMPP server to connect to (optional)
+#   resource   -- login resource (optional)
+#   user_agent -- HTTP User-Agent for feed polling (optional)
+
+[jabrss]
+
+# (required) XMPP account (JID) the bot logs in as. A resource may be
+# included here, e.g. "jabrss@example.com/news".
+jid = jabrss@example.com
+
+# (required) password of the XMPP account.
+password = change-me
+
+# (optional) XMPP server to connect to. If omitted, the server is
+# resolved via SRV records of the JID domain, trying "_xmpps-client"
+# (direct TLS) before "_xmpp-client" (STARTTLS). A port may be appended
+# with a colon, e.g. "example.com:5222".
+host = example.com
+
+# (optional) resource used when logging in. If omitted, the resource
+# part of "jid" is used, and if that is empty as well, the local
+# hostname.
+resource = news
+
+# (optional) HTTP User-Agent header sent when polling feeds. If omitted,
+# the default "JabRSS (http://jabrss.cmeerw.org)" is used.
+#user_agent = JabRSS (http://jabrss.cmeerw.org)

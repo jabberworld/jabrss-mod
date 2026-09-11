@@ -1,0 +1,8 @@
+*.db
+*.conf
+*.pyc
+core
+__pycache__/
+.cursor/
+.opencode/
+.windsurfrules

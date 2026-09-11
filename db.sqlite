@@ -16,17 +16,18 @@
 -- Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA 02111-1307
 -- USA
 
-CREATE TABLE user (
+CREATE TABLE IF NOT EXISTS user (
     uid INTEGER PRIMARY KEY,
     jid TEXT NOT NULL,
     conf INTEGER NOT NULL,
     store_messages INTEGER NOT NULL DEFAULT 16,
     size_limit INTEGER,
     since INTEGER,
+    pending_removal INTEGER, -- UNIX timestamp when first noticed not subscribed
     UNIQUE (jid)
 );
 
-CREATE TABLE user_stat (
+CREATE TABLE IF NOT EXISTS user_stat (
     uid INTEGER NOT NULL,
     start INTEGER NOT NULL, -- week since 1970 (1 = week starting 5.1.1970)
     nr_msgs0 SMALLINT NOT NULL DEFAULT 0,
@@ -48,17 +49,17 @@ CREATE TABLE user_stat (
     UNIQUE (uid) ON CONFLICT REPLACE
 );
 
-CREATE TABLE user_resource (
+CREATE TABLE IF NOT EXISTS user_resource (
     uid INTEGER NOT NULL,
     rid INTEGER NOT NULL,
     seq_nr INTEGER,
     UNIQUE (uid, rid) ON CONFLICT REPLACE
 );
 
-CREATE INDEX user_resource_rid ON
+CREATE INDEX IF NOT EXISTS user_resource_rid ON
     user_resource (rid);
 
-CREATE TRIGGER user_delete AFTER DELETE ON user
+CREATE TRIGGER IF NOT EXISTS user_delete AFTER DELETE ON user
     FOR EACH ROW BEGIN
         DELETE FROM user_resource WHERE uid=old.uid;
         DELETE FROM user_stat WHERE uid=old.uid;
@@ -67,7 +68,7 @@ CREATE TRIGGER user_delete AFTER DELETE ON user
 
 ATTACH DATABASE "jabrss_res.db" AS res;
 
-CREATE TABLE res.resource (
+CREATE TABLE IF NOT EXISTS res.resource (
     rid INTEGER PRIMARY KEY,
     url TEXT NOT NULL,
     last_updated INTEGER, -- UNIX timestamp
@@ -85,7 +86,7 @@ CREATE TABLE res.resource (
     UNIQUE (url)
 );
 
-CREATE TABLE res.resource_history (
+CREATE TABLE IF NOT EXISTS res.resource_history (
     rid INTEGER NOT NULL,
     time_items0 INTEGER, -- UNIX timestamp
     nr_items0 SMALLINT,
@@ -122,7 +123,7 @@ CREATE TABLE res.resource_history (
     UNIQUE (rid) ON CONFLICT REPLACE
 );
 
-CREATE TABLE res.resource_data (
+CREATE TABLE IF NOT EXISTS res.resource_data (
     rid INTEGER NOT NULL,
     seq_nr INTEGER NOT NULL,
     published INTEGER,
@@ -134,7 +135,7 @@ CREATE TABLE res.resource_data (
     UNIQUE (rid, seq_nr) ON CONFLICT REPLACE
 );
 
-CREATE TRIGGER res.resource_delete AFTER DELETE ON resource
+CREATE TRIGGER IF NOT EXISTS res.resource_delete AFTER DELETE ON resource
     FOR EACH ROW BEGIN
         DELETE FROM resource_history WHERE rid=old.rid;
         DELETE FROM resource_data WHERE rid=old.rid;

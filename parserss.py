@@ -1,7 +1,10 @@
 #!/usr/bin/python
 # Copyright (C) 2001-2020, Christof Meerwald
 # https://jabrss.cmeerw.org
-
+# 
+# 2022 - 2026, rain @ JabberWorld
+# https://jabberworld.info
+# 
 # This program is free software; you can redistribute it and/or modify
 # it under the terms of the GNU General Public License as published by
 # the Free Software Foundation; version 2 dated June, 1991.
@@ -16,36 +19,30 @@
 # Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA 02111-1307
 # USA
 
-from __future__ import with_statement
+# Feed parsing (RSS 0.9x/1.0/1.1/2.0, Atom 0.3/1.0, RDF, CDF) is
+# delegated to the "feedparser" library; this module keeps the
+# fetching (via requests), HTTP caching (ETag/Last-Modified),
+# persistence (SQLite), item deduplication and adaptive polling.
 
-import codecs, functools, hashlib, logging, random, re, socket, struct
-import sys, time, threading, traceback, zlib
+import calendar, functools, hashlib, logging, random, re, socket
+import sys, time, threading, traceback, warnings
 import sqlite3
 import requests
+import feedparser
 
 from email.utils import formatdate, mktime_tz, parsedate_tz
 
-try:
-    from lxml.etree import Element, XMLParser
-except ImportError:
-    try:
-        from xml.etree.cElementTree import Element, XMLParser
-    except ImportError:
-        from xml.etree.ElementTree import Element, XMLParser
-
-from contenttools import htmlelem2plain, html2plain, xml2plain
-
-if sys.version_info[0] == 2:
-    from HTMLParser import HTMLParser
-    from StringIO import StringIO
-    from urlparse import urlsplit, urljoin
-else:
-    from html.parser import HTMLParser
-    from io import StringIO
-    from urllib.parse import urlsplit, urljoin
-    unichr = chr
+from html.entities import name2codepoint
+from html.parser import HTMLParser
+from io import StringIO
+from urllib.parse import urlsplit, urljoin
 
 logger = logging.getLogger('parserss')
+
+# fetch of feeds with untrusted TLS certificates intentionally falls back
+# to an unverified connection; we log our own warning then, so suppress
+# the urllib3 "Unverified HTTPS request" warning it would emit as well
+warnings.filterwarnings('ignore', message='Unverified HTTPS request')
 
 
 __all__ = [
@@ -53,18 +50,6 @@ __all__ = [
     'RSS_Resource_db', 'RSS_Resource_Cursor',
     'UrlError', 'init_parserss',
 ]
-
-if sys.version_info[0] == 2:
-    import string
-    str_trans = string.maketrans(
-        '\x00\x01\x02\x03\x04\x05\x06\x07\x08\x09\x0a\x0b\x0c\x0d\x0e\x0f' \
-            '\x10\x11\x12\x13\x14\x15\x16\x17\x18\x19\x1a\x1b\x1c\x1d\x1e\x1f' \
-            ''.encode('ascii'),
-        '          \x0a                     '.encode('ascii'))
-else:
-    str_trans = None
-    def buffer(b):
-        return b
 
 unicode_trans = {
     0x00 : 0x20, 0x01 : 0x20, 0x02 : 0x20, 0x03 : 0x20,
@@ -81,7 +66,7 @@ random.seed()
 
 
 def RSS_Resource_db():
-    db = sqlite3.Connection(DB_FILENAME, 60000)
+    db = sqlite3.connect(DB_FILENAME, timeout=60000)
     db.isolation_level = None
     db.cursor().execute('PRAGMA synchronous=NORMAL')
 
@@ -101,20 +86,163 @@ MIN_INTERVAL = 1*60
 MAX_INTERVAL = 24*60*60
 MAX_XML_SIZE = 4 * 1024 * 1024
 DB_FILENAME = 'parserss.db'
+USER_AGENT = 'JabRSS (http://jabrss.cmeerw.org)'
 
 def init_parserss(db_fname = DB_FILENAME,
                   min_interval = MIN_INTERVAL,
                   max_interval = MAX_INTERVAL,
                   interval_div = INTERVAL_DIVIDER,
-                  dbsync_obj = Null_Synchronizer()):
-    global DB_FILENAME, MIN_INTERVAL, MAX_INTERVAL, INTERVAL_DIVIDER
+                  dbsync_obj = Null_Synchronizer(),
+                  user_agent = USER_AGENT):
+    global DB_FILENAME, MIN_INTERVAL, MAX_INTERVAL, INTERVAL_DIVIDER, \
+           USER_AGENT
 
     DB_FILENAME = db_fname
     MIN_INTERVAL = min_interval
     MAX_INTERVAL = max_interval
     INTERVAL_DIVIDER = interval_div
+    USER_AGENT = user_agent
 
     RSS_Resource._db_sync = dbsync_obj
+
+
+# convert an HTML fragment to plain text (used to turn the HTML that
+# feedparser returns for titles/summaries into the plain-text
+# descriptions that JabRSS delivers via XMPP)
+def html2plain(html, ignore_errors=False):
+    class HTML2Plain(HTMLParser):
+        def __init__(self, ignore_errors=False):
+            HTMLParser.__init__(self)
+            self.__buf = StringIO()
+            self.__processed, self.__errors, self.__ignore_errors = 0, 0, ignore_errors
+            self.__in_pre, self.__has_space, self.__has_nl = False, True, True
+
+        def close(self):
+            HTMLParser.close(self)
+            text = self.__buf.getvalue()
+            self.__buf.close()
+
+            if self.__ignore_errors or self.__errors == 0 or \
+               self.__processed > 3*self.__errors:
+                return text
+            else:
+                return None
+
+        def handle_data(self, data):
+            if not self.__in_pre and data:
+                l = data.split()
+                if l:
+                    pre_space = not self.__has_space and (data[:1] in (' ', '\t', '\r', '\n'))
+                    post_space = (data[-1:] in (' ', '\t', '\r', '\n'))
+                    data = int(pre_space)*' ' + ' '.join(data.split()) + int(post_space)*' '
+                    self.__has_space, self.__has_nl = post_space, False
+                else:
+                    data = ''
+
+            self.__buf.write(data)
+
+        def handle_charref(self, name):
+            try:
+                self.handle_data(chr(int(name)))
+            except ValueError:
+                self.__errors += 1
+
+        def handle_entityref(self, name):
+            try:
+                self.handle_data(chr(name2codepoint[name]))
+            except KeyError:
+                self.__errors += 1
+
+        def handle_starttag(self, tag, attrs):
+            if tag in ('br', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'h7',
+                       'div', 'p', 'pre', 'tr'):
+                if not self.__has_nl:
+                    self.__buf.write('\n')
+                    self.__has_nl, self.__has_space = True, True
+                if tag == 'pre':
+                    self.__in_pre = True
+            elif tag in ('li',):
+                if not self.__has_nl:
+                    self.__buf.write('\n')
+                self.__buf.write(' * ')
+                self.__has_nl, self.__has_space = True, True
+            elif tag in ('td',):
+                if not self.__has_space and not self.__has_nl:
+                    self.__buf.write(' ')
+                    self.__has_nl, self.__has_space = False, True
+            elif tag == 'img':
+                d = dict(attrs)
+                self.handle_data(d.get('alt', '') or d.get('title', ''))
+            self.__processed += 1
+
+        def handle_startendtag(self, tag, attrs):
+            return self.handle_starttag(tag, attrs)
+
+        def handle_endtag(self, tag):
+            if tag == 'pre':
+                self.__in_pre, self.__has_nl, self.__has_space = False, False, True
+            self.__processed += 1
+
+        def handle_comment(self, data):
+            self.__processed += 1
+
+        def unknown_decl(self, data):
+            self.__errors += 1
+
+
+    try:
+        parser = HTML2Plain(ignore_errors)
+        parser.feed(html)
+        text = parser.close()
+    except:
+        text = None
+
+    if text == None:
+        return html
+    else:
+        return text
+
+
+# HTML autodiscovery: extract the feed URL from a page containing
+# <link rel="alternate" type="application/rss+xml" href="...">
+class _AutodiscoveryParser(HTMLParser):
+    def __init__(self):
+        HTMLParser.__init__(self)
+        self.redirect_url = None
+
+    def handle_starttag(self, tag, attrs):
+        if tag == 'link' and self.redirect_url is None:
+            dattrs = dict(attrs)
+            if (dattrs.get('rel') == 'alternate' and
+                dattrs.get('type') in ('application/atom+xml',
+                                       'application/rdf+xml',
+                                       'application/rss+xml')):
+                self.redirect_url = dattrs.get('href')
+
+    def handle_startendtag(self, tag, attrs):
+        return self.handle_starttag(tag, attrs)
+
+
+def _try_autodiscovery(raw):
+    text = None
+    for enc in ('utf-8', 'iso8859-1'):
+        try:
+            text = raw.decode(enc)
+            break
+        except (UnicodeDecodeError, ValueError):
+            pass
+
+    if text is None:
+        return None
+
+    parser = _AutodiscoveryParser()
+    try:
+        parser.feed(text)
+        parser.close()
+    except:
+        return None
+
+    return parser.redirect_url
 
 
 class UrlError(ValueError):
@@ -186,10 +314,7 @@ def split_url(url):
 
 
 def normalize_text(s):
-    if type(s) == type(b''.decode('ascii')):
-        s = s.translate(unicode_trans)
-    else:
-        s = s.translate(str_trans)
+    s = s.translate(unicode_trans)
 
     s = '\n'.join(filter(lambda x: x != '', [ x.strip() for x in s.split('\n') ]))
     s = ' '.join(filter(lambda x: x != '', s.split(' ')))
@@ -199,7 +324,7 @@ def normalize_obj(o):
     for attr in dir(o):
         if attr[0] != '_':
             value = getattr(o, attr)
-            if type(value) in (type(''), type(b''.decode('ascii'))):
+            if type(value) is str:
                 setattr(o, attr, normalize_text(value))
 
     return o
@@ -223,31 +348,6 @@ def normalize_item(item):
 
     return item
 
-
-re_dateTime = re.compile('^(?P<year>[1-9][0-9][0-9][0-9])-(?P<month>[01][0-9])-(?P<day>[0-3][0-9])T(?P<hour>[0-2][0-9]):(?P<min>[0-6][0-9]):(?P<sec>[0-6][0-9])(\\.[0-9]+)?(Z|(?P<tzsign>[-+])(?P<tzhour>[01][0-9]):(?P<tzmin>[0-6][0-9]))$')
-
-def parse_dateTime(s):
-    if s == None:
-        return None
-
-    mo = re_dateTime.match(s)
-    if mo != None:
-        year, month, day, hour, min, sec = [ int(x) for x in mo.group('year', 'month', 'day', 'hour', 'min', 'sec')]
-
-        tzsign, tzhour, tzmin = mo.group('tzsign', 'tzhour', 'tzmin')
-        if tzhour != None and tzmin != None:
-            tzoff = 60*(60*int(tzhour) + int(tzmin))
-        else:
-            tzoff = 0
-
-        if tzsign == '-':
-            tzoff = -tzoff
-
-        tstamp = int(mktime_tz((year, month, day, hour, min, sec, 0, 0, 0, tzoff)))
-    else:
-        tstamp = None
-
-    return tstamp
 
 def parse_Rfc822DateTime(s):
     if s == None:
@@ -385,509 +485,217 @@ class FeedError(Exception):
     def __init__(self, e):
         Exception.__init__(self, e)
 
-class RetryAsHtml(Exception):
-    def __init__(self):
-        Exception.__init__(self)
 
+# ---- feedparser adapter -------------------------------------------------
 
-def findtag(parent, tags):
-    elem = None
+def _content_rank(typ):
+    if typ.startswith('text/plain'):
+        return 2
+    elif typ in ('text/html', 'application/xhtml+xml') or 'html' in typ:
+        return 1
+    return 0
 
-    for tag in tags:
-        elem = parent.find(tag)
-        if elem != None:
-            break
-
-    return elem
-
-def findattr(l, textattr, attr=None, values=(), default=''):
-    text, typ = '', None
-    for e in l:
-        thistyp = -1
-        if attr != None:
-            try:
-                thistyp = values.index(e.get(attr, default))
-            except ValueError:
-                pass
-
-        if text == '' or thistyp > typ:
-            if e.get(textattr, None):
-                text, typ = e.get(textattr, None), thistyp
-
-    return text
-
-def findelem(l, attr=None, values=(), default=''):
-    elem, typ = None, None
-    for e in l:
-        thistyp = -1
-        if attr != None:
-            try:
-                thistyp = values.index(e.get(attr, default))
-            except ValueError:
-                pass
-
-        if elem == None or thistyp > typ:
-            elem, typ = e, thistyp
-
-    return elem
-
-
-def typedtext(elem):
-    if elem == None:
-        return ''
-    if elem.get('type', None) == 'html':
-        return htmlelem2plain(elem)
-    else:
-        buf = StringIO()
-        xml2plain(elem, buf)
-        text = buf.getvalue()
-        buf.close()
-        return text
-
-
-class Feed_Parser:
-    class Handler:
-        def __init__(self):
-            self.__doctype, self.__data, self.__elem, self.__last, self.__tail = None, [], [], None, None
-
-            self.__toplevel_handler = {
-                '{http://www.w3.org/2005/Atom}feed' :
-                    (self.atom10_feed_start, self.atom10_feed_end),
-                '{http://purl.org/atom/ns#}feed' :
-                    (self.atom03_feed_start, self.atom03_feed_end),
-
-                '{http://www.w3.org/1999/02/22-rdf-syntax-ns#}RDF' :
-                    (self.rss_start, self.rss_end),
-                'rss' :
-                    (self.rss_start, self.rss_end),
-                '{http://backend.userland.com/rss2}rss' :
-                    (self.rss_start, self.rss_end),
-
-                # RSS 1.1, see http://inamidst.com/rss1.1/
-                '{http://purl.org/net/rss1.1#}Channel' :
-                    (self.rss11_start, self.rss11_end),
-                }
-            self.__end_handler, self.__element_handler = None, {}
-
-            self.redirect_url, self.info, self.elements = None, None, []
-
-        def close(self):
-            assert len(self.__elem) == 0, "missing end tags"
-            assert self.__last != None, "missing toplevel element"
-            return self.__last
-
-        def __flush(self):
-            if self.__data:
-                if self.__last is not None:
-                    text = ''.join(self.__data)
-                    if self.__tail:
-                        assert self.__last.tail is None, "internal error (tail)"
-                        self.__last.tail = text
-                    else:
-                        assert self.__last.text is None, "internal error (text)"
-                        self.__last.text = text
-                self.__data = []
-
-        def data(self, data):
-            self.__data.append(data)
-
-        def start(self, tag, attrs):
-            if attrs == None:
-                attrs = {}
-            self.__flush()
-            self.__last = elem = Element(tag, attrs)
-
-            if len(self.__elem) == 0:
-                try:
-                    handler, self.__end_handler = self.__toplevel_handler[tag]
-                except KeyError:
-                    handler = None
-
-                if handler:
-                    handler(elem)
-                elif tag in ('html', '{http://www.w3.org/1999/xhtml}html'):
-                    raise RetryAsHtml()
-                elif self.__doctype == 'html':
-                    raise RetryAsHtml()
-                else:
-                    raise FeedError('Unknown start tag %s' % (tag,))
-
-            self.__elem.append(elem)
-            self.__tail = False
-            return elem
-
-        def end(self, tag):
-            self.__flush()
-            self.__last = self.__elem.pop()
-            assert self.__last.tag == tag,\
-                   "end tag mismatch (expected %s, got %s)" % (
-                       self.__last.tag, tag)
-            self.__tail = True
-
-            if len(self.__elem) == 0:
-                self.__end_handler(self.__last)
-            else:
-                try:
-                    handler = self.__element_handler[tag]
-                except KeyError:
-                    handler, keep = None, len(self.__elem) >= 2
-
-                if handler:
-                    keep = handler(self.__last)
-                if keep:
-                    self.__elem[-1].append(self.__last)
-
-            self._root = self.__last
-            return self.__last
-
-
-        def keep_elem(self, elem):
-            return True
-
-
-        def atom03_feed_start(self, elem):
-            self.__element_handler = {
-                '{http://purl.org/atom/ns#}entry' :
-                    self.atom03_entry,
-                '{http://purl.org/atom/ns#}title' :
-                    self.keep_elem,
-                '{http://purl.org/atom/ns#}link' :
-                    self.keep_elem,
-                '{http://purl.org/atom/ns#}tagline' :
-                    self.keep_elem,
-                '{http://purl.org/atom/ns#}id' :
-                    self.keep_elem,
-                '{http://purl.org/atom/ns#}created' :
-                    self.keep_elem,
-                '{http://purl.org/atom/ns#}modified' :
-                    self.keep_elem,
-                }
-
-        def atom03_feed_end(self, elem):
-            ns = '{http://purl.org/atom/ns#}'
-
-            title = typedtext(elem.find(ns + 'title'))
-            descr = typedtext(elem.find(ns + 'tagline'))
-            link = findattr(elem.findall(ns + 'link'),
-                            'href', 'rel',
-                            ['via', 'related', 'enclosure', 'alternate'],
-                            'alternate')
-            guid = elem.findtext(ns + 'id')
-            published = parse_dateTime(elem.findtext(ns + 'created') or \
-                                           elem.findtext(ns + 'modified') or \
-                                           None)
-
-            self.info = Data(title=title, descr=descr, link=link,
-                             guid=guid, published=published)
-
-
-        def atom03_entry(self, elem):
-            ns = '{http://purl.org/atom/ns#}'
-
-            title = typedtext(elem.find(ns + 'title'))
-            descr = typedtext(findelem(elem.findall(ns + 'summary') +
-                                       elem.findall(ns + 'content'),
-                                       'type', ['html', 'xhtml', 'text'],
-                                       'text'))
-            link = findattr(elem.findall(ns + 'link'),
-                            'href', 'rel',
-                            ['via', 'related', 'enclosure', 'alternate'],
-                            'alternate')
-            guid = elem.findtext(ns + 'id')
-            published = parse_dateTime(elem.findtext(ns + 'created') or \
-                                           elem.findtext(ns + 'modified') or \
-                                           None)
-
-            self.elements.append(Data(title=title, descr=descr, link=link,
-                                      guid=guid, published=published))
-            return False
-
-        def atom10_feed_start(self, elem):
-            self.__element_handler = {
-                '{http://www.w3.org/2005/Atom}entry' :
-                    self.atom10_entry,
-                '{http://www.w3.org/2005/Atom}title' :
-                    self.keep_elem,
-                '{http://www.w3.org/2005/Atom}link' :
-                    self.keep_elem,
-                '{http://www.w3.org/2005/Atom}subtitle' :
-                    self.keep_elem,
-                '{http://www.w3.org/2005/Atom}id' :
-                    self.keep_elem,
-                '{http://www.w3.org/2005/Atom}updated' :
-                    self.keep_elem,
-                }
-
-        def atom10_feed_end(self, elem):
-            ns = '{http://www.w3.org/2005/Atom}'
-
-            title = typedtext(elem.find(ns + 'title'))
-            descr = typedtext(elem.find(ns + 'subtitle'))
-            link = findattr(elem.findall(ns + 'link'),
-                            'href', 'rel',
-                            ['via', 'related', 'enclosure', 'alternate'],
-                            'alternate')
-            guid = elem.findtext(ns + 'id')
-            published = parse_dateTime(elem.findtext(ns + 'published') or \
-                                           elem.findtext(ns + 'updated') or \
-                                           None)
-
-            self.info = Data(title=title, descr=descr, link=link,
-                             guid=guid, published=published)
-
-
-        def atom10_entry(self, elem):
-            ns = '{http://www.w3.org/2005/Atom}'
-
-            title = typedtext(elem.find(ns + 'title'))
-            descr = typedtext(findelem(elem.findall(ns + 'summary') +
-                                       elem.findall(ns + 'content'),
-                                       'type', ['html', 'xhtml', 'text'],
-                                       'text'))
-            link = findattr(elem.findall(ns + 'link'),
-                            'href', 'rel',
-                            ['via', 'related', 'enclosure', 'alternate'],
-                            'alternate')
-            guid = elem.findtext(ns + 'id')
-            published = parse_dateTime(elem.findtext(ns + 'published') or \
-                                           elem.findtext(ns + 'updated') or \
-                                           None)
-
-            self.elements.append(Data(title=title, descr=descr, link=link,
-                                      guid=guid, published=published))
-            return False
-
-
-        def rss_start(self, elem):
-            self.__element_handler = {
-                'channel' :
-                    self.keep_elem,
-                '{http://purl.org/rss/1.0/}channel' :
-                    self.keep_elem,
-                '{http://purl.org/rss/2.0/}channel' :
-                    self.keep_elem,
-                '{http://backend.userland.com/rss2}channel' :
-                    self.keep_elem,
-                '{http://my.netscape.com/publish/formats/rss-0.91.dtd}channel' :
-                    self.keep_elem,
-                '{http://my.netscape.com/rdf/simple/0.9/}channel' :
-                    self.keep_elem,
-
-                'item' :
-                    self.rss_entry,
-                '{http://purl.org/rss/1.0/}item' :
-                    self.rss_entry,
-                '{http://purl.org/rss/2.0/}item' :
-                    self.rss_entry,
-                '{http://backend.userland.com/rss2}item' :
-                    self.rss_entry,
-                '{http://my.netscape.com/publish/formats/rss-0.91.dtd}item' :
-                    self.rss_entry,
-                '{http://my.netscape.com/rdf/simple/0.9/}item' :
-                    self.rss_entry,
-                }
-
-        def rss_end(self, elem):
-            channel = findtag(elem,
-                              ('channel',
-                               '{http://backend.userland.com/rss2}channel',
-                               '{http://purl.org/rss/1.0/}channel',
-                               '{http://purl.org/rss/2.0/}channel',
-                               '{http://my.netscape.com/publish/formats/rss-0.91.dtd}channel',
-                               '{http://my.netscape.com/rdf/simple/0.9/}channel'))
-
-            if channel != None:
-                if channel.tag[0] == '{':
-                    ns = channel.tag.split('}')[0] + '}'
-                else:
-                    ns = ''
-
-                title = htmlelem2plain(channel.find(ns + 'title'))
-                descr = htmlelem2plain(channel.find(ns + 'description'))
-                link = channel.findtext(ns + 'link')
-                if link:
-                    link = link.strip()
-                guid = channel.get('{http://www.w3.org/1999/02/22-rdf-syntax-ns#}about', None)
-                published = parse_dateTime(channel.findtext('{http://purl.org/dc/elements/1.1/}date')) or \
-                    parse_Rfc822DateTime(channel.findtext(ns + 'lastBuildDate')) or \
-                    None
-
-                self.info = Data(title=title, descr=descr, link=link,
-                                 guid=guid, published=published)
-
-        def rss_entry(self, elem):
-            if elem.tag[0] == '{':
-                ns = elem.tag.split('}')[0] + '}'
-            else:
-                ns = ''
-
-            title = htmlelem2plain(elem.find(ns + 'title'))
-            descr = htmlelem2plain(elem.find(ns + 'description'))
-            link = elem.findtext('{http://www.pheedo.com/namespace/pheedo}origLink') or \
-                elem.findtext('{http://rssnamespace.org/feedburner/ext/1.0}origLink') or \
-                elem.findtext(ns + 'link')
-
-            enclosure = elem.find(ns + 'enclosure')
-            if enclosure != None and enclosure.get('url', ''):
-                if not link or enclosure.get('type', '') in ('audio/mpeg',):
-                    # prioritise certain types of enclosures
-                    link = enclosure.get('url', '')
-
-            if link == None:
-                link = ''
-            else:
-                link = link.strip()
-
-            guid = elem.get('{http://www.w3.org/1999/02/22-rdf-syntax-ns#}about', None) or \
-                elem.findtext(ns + 'guid')
-
-            published = parse_dateTime(elem.findtext('{http://purl.org/dc/elements/1.1/}date')) or \
-                parse_Rfc822DateTime(elem.findtext(ns + 'pubDate')) or \
-                None
-
-            self.elements.append(Data(title=title, descr=descr, link=link,
-                                      guid=guid, published=published))
-            return False
-
-
-        def rss11_start(self, elem):
-            self.__element_handler = {
-                '{http://purl.org/net/rss1.1#}title' :
-                    self.keep_elem,
-                '{http://purl.org/net/rss1.1#}link' :
-                    self.keep_elem,
-                '{http://purl.org/net/rss1.1#}description' :
-                    self.keep_elem,
-
-                '{http://purl.org/net/rss1.1#}item' :
-                    self.rss11_entry,
-                }
-
-        def rss11_end(self, elem):
-            ns = '{http://purl.org/net/rss1.1#}'
-
-            title = (elem.findtext(ns + 'title') or '').strip()
-            descr = (elem.findtext(ns + 'description') or '').strip()
-            link = (elem.findtext(ns + 'link') or '').strip()
-            guid = None
-            published = None
-
-            self.info = Data(title=title, descr=descr, link=link,
-                             guid=guid, published=published)
-
-        def rss11_entry(self, elem):
-            ns = '{http://purl.org/net/rss1.1#}'
-
-            title = (elem.findtext(ns + 'title') or '').strip()
-            descr = (elem.findtext(ns + 'description') or '').strip()
-            link = (elem.findtext(ns + 'link') or '').strip()
-            guid = elem.get('{http://www.w3.org/1999/02/22-rdf-syntax-ns#}about', None)
-            published = None
-
-            self.elements.append(Data(title=title, descr=descr, link=link,
-                                      guid=guid, published=published))
-            return False
-
-    class HtmlLinkParser(HTMLParser):
-        def __init__(self):
-            HTMLParser.__init__(self)
-            self.redirect_url, self.info, self.elements = None, None, []
-
-        def close(self):
-            HTMLParser.close(self)
-
-            if not self.redirect_url:
-                raise FeedError('No RSS autodiscovery links found in html')
-
-        def handle_starttag(self, tag, attrs):
-            if tag == 'link' and self.redirect_url == None:
-                dattrs = dict(attrs)
-                if (dattrs.get('rel') == 'alternate' and
-                    dattrs.get('type') in ('application/atom+xml', 'application/rdf+xml', 'application/rss+xml')):
-                    self.redirect_url = dattrs.get('href')
-                    self.info = Data(title=dattrs.get('title', ''),
-                                     descr='', link=self.redirect_url,
-                                     guid=None, published=None)
-            elif tag == 'body' and not self.redirect_url:
-                raise FeedError('No RSS autodiscovery links found in html')
-
-        def handle_startendtag(self, tag, attrs):
-            return self.handle_starttag(tag, attrs)
-
-        def handle_endtag(self, tag):
-            if tag == 'head' and not self.redirect_url:
-                raise FeedError('No RSS autodiscovery links found in html')
-
-
-    def __init__(self, base_url, encoding):
-        self.__buf = []
-        self.__base_url = base_url
-        self.__handler = Feed_Parser.Handler()
-        if hasattr(XMLParser, 'feed_error_log'):
-            self.__parser = XMLParser(target=self.__handler, recover=True, encoding=encoding)
-        else:
-            self.__parser = XMLParser(target=self.__handler, encoding=encoding)
-
-
-    def get_error_log(self):
-        if hasattr(self.__parser, 'feed_error_log'):
-            return self.__parser.feed_error_log
+def _as_plain(value, detail=None):
+    if value is None:
         return None
 
+    typ = ''
+    if detail is not None:
+        typ = detail.get('type') or ''
+
+    if typ.startswith('text/plain'):
+        return value.strip() if isinstance(value, str) else value
+
+    if 'html' in typ or typ in ('application/xhtml+xml',):
+        return html2plain(value) or value
+
+    return value.strip() if isinstance(value, str) else value
+
+def _first_ts(*parsed_list):
+    for parsed in parsed_list:
+        if parsed is not None:
+            return calendar.timegm(parsed)
+    return None
+
+def _feed_item_description(entry):
+    content = entry.get('content')
+    if content:
+        best, best_rank = None, -1
+        for c in content:
+            rank = _content_rank(c.get('type') or '')
+            if rank >= best_rank:
+                best, best_rank = c, rank
+
+        value = best.get('value')
+        if value is None:
+            return None
+        if best.get('type', '').startswith('text/plain'):
+            return value
+        return html2plain(value) or value
+
+    summary = entry.get('summary')
+    if summary is not None:
+        return _as_plain(summary, entry.get('summary_detail'))
+
+    return None
+
+
+class FeedParser:
+    # feedparser-based replacement for the old streaming XML parser
+    def __init__(self, base_url):
+        # base_url is a (protocol, host, path) tuple
+        self.__base_url = base_url
+        self.__buf = []
+        self.__error_log = None
+
+        self.redirect_url = None
+        self.info = None
+        self.elements = []
+
+    def get_error_log(self):
+        return self.__error_log
+
     def get_info(self):
-        return self.__handler.info
+        return self.info
 
     def get_items(self):
-        return self.__handler.elements
+        return self.elements
 
     def get_redirect_url(self):
-        return self.__handler.redirect_url
-
-
-    def __resolve_link(self, url):
-        return urljoin('%s://%s/%s' % (self.__base_url), url)
-
-    def __retry_as_html(self):
-        self.__handler = Feed_Parser.HtmlLinkParser()
-        self.__parser = self.__handler
-
-        for data in self.__buf:
-            self.__parser.feed(data.decode('iso8859-1'))
-        self.__buf = None
-
+        return self.redirect_url
 
     def feed(self, data):
-        try:
-            try:
-                res = self.__parser.feed(data)
-            finally:
-                if self.__buf != None:
-                    self.__buf.append(data)
-        except RetryAsHtml:
-            self.__retry_as_html()
+        self.__buf.append(data)
+
+    def __resolve_link(self, url):
+        if url == None:
+            return ''
+
+        protocol, host, path = self.__base_url
+        base = '%s://%s%s' % (protocol, host, path)
+        return urljoin(base, url)
+
+    def __feed_info(self, feed):
+        if feed is None:
+            return None
+
+        title = feed.get('title')
+        if title is not None:
+            title = _as_plain(title, feed.get('title_detail'))
+
+        descr = feed.get('subtitle')
+        if descr is None:
+            descr = feed.get('description')
+        if descr is not None:
+            descr = _as_plain(descr,
+                              feed.get('subtitle_detail') or
+                              feed.get('description_detail'))
+
+        link = feed.get('link') or ''
+        if not link:
+            for l in feed.get('links') or []:
+                if l.get('rel') in (None, 'alternate'):
+                    link = l.get('href') or ''
+                    break
+
+        guid = feed.get('id')
+        published = _first_ts(feed.get('published_parsed'),
+                              feed.get('updated_parsed'))
+
+        return Data(title=title, descr=descr, link=link,
+                    guid=guid, published=published)
+
+    @staticmethod
+    def __is_feed(feed, entries):
+        # a real feed either has entries or at least a channel title/link/id
+        if entries:
+            return True
+        if feed.get('title') or feed.get('link') or feed.get('id'):
+            return True
+        return False
+
+    @staticmethod
+    def __autodiscovery_url(feed, raw):
+        for l in feed.get('links') or []:
+            if (l.get('rel') == 'alternate' and
+                l.get('type') in ('application/atom+xml',
+                                  'application/rdf+xml',
+                                  'application/rss+xml')):
+                href = l.get('href')
+                if href:
+                    return href
+
+        return _try_autodiscovery(raw)
+
+    def __feed_item(self, entry):
+        title = entry.get('title')
+        if title is not None:
+            title = _as_plain(title, entry.get('title_detail'))
+
+        descr = _feed_item_description(entry)
+
+        link = entry.get('feedburner_origlink') or \
+            entry.get('pheedo_origlink') or ''
+        if not link:
+            link = entry.get('link') or ''
+        if not link:
+            for l in entry.get('links') or []:
+                if l.get('rel') in (None, 'alternate'):
+                    link = l.get('href') or ''
+                    break
+
+        enclosure = None
+        for e in entry.get('enclosures') or []:
+            enclosure = e
+            break
+        if enclosure is not None and enclosure.get('href'):
+            if not link or enclosure.get('type') in ('audio/mpeg',):
+                # prioritise certain types of enclosures
+                link = enclosure.get('href')
+
+        guid = entry.get('id')
+        published = _first_ts(entry.get('published_parsed'),
+                              entry.get('updated_parsed'))
+
+        return Data(title=title, descr=descr, link=link,
+                    guid=guid, published=published)
 
     def close(self):
+        raw = b''.join(self.__buf)
+        self.__buf = None
+
         try:
-            self.__parser.close()
-            elem = self.__handler.close()
-        except RetryAsHtml:
-            self.__retry_as_html()
-            elem = None
+            parsed = feedparser.parse(raw)
+        except Exception as e:
+            raise FeedError(str(e))
 
-        info = self.__handler.info
-        if info != None:
-            info.link = self.__resolve_link(info.link)
-        else:
-            raise Exception('No feed information found')
+        if parsed.get('bozo'):
+            self.__error_log = str(parsed.get('bozo_exception'))
 
-        redirect_url = self.__handler.redirect_url
-        if redirect_url != None:
-            self.__handler.redirect_url = self.__resolve_link(redirect_url)
+        feed = parsed.get('feed') or {}
+        entries = parsed.get('entries') or []
 
-        for item in self.__handler.elements:
+        if not self.__is_feed(feed, entries):
+            # document not recognized as a feed, retry as HTML
+            # (autodiscovery)
+            redirect_url = self.__autodiscovery_url(feed, raw)
+            if redirect_url is not None:
+                self.redirect_url = self.__resolve_link(redirect_url)
+                return
+
+            raise FeedError('No feed information found')
+
+        info = self.__feed_info(feed)
+        if info is None:
+            raise FeedError('No feed information found')
+
+        info.link = self.__resolve_link(info.link)
+        self.info = info
+
+        for entry in entries:
+            item = self.__feed_item(entry)
             item.link = self.__resolve_link(item.link)
-
-        return elem
+            self.elements.append(item)
 
 
 def default_redirect_cb(redirect_url, db, redirect_count,
@@ -929,6 +737,7 @@ class RSS_Resource:
         self._etag = None
         self._invalid_since, self._err_info = None, None
         self._redirect, self._redirect_seq = None, None
+        self._insecure = False
         self._penalty = 0
         title, description, link = None, None, None
 
@@ -1074,8 +883,7 @@ class RSS_Resource:
             self._invalid_since = now
 
         sess = requests.Session()
-        sess.headers.update({ 'User-Agent' :
-                              'JabRSS (http://jabrss.cmeerw.org)' })
+        sess.headers.update({ 'User-Agent' : USER_AGENT })
 
         redirect_penalty = 0
         redirect_tries = redirect_count
@@ -1135,11 +943,34 @@ class RSS_Resource:
                     else:
                         visited[k] = True
 
-                    response = sess.get('%s://%s%s' % (url_protocol, url_host,
-                                                       url_path),
-                                        allow_redirects=False, stream=True,
-                                        timeout=self._connect_timeout,
-                                        verify=False)
+                    # verify the TLS certificate first; if that fails
+                    # (untrusted/expired certificate), fall back to an
+                    # insecure connection for this feed, but log our own
+                    # warning so it stays visible on the console
+                    if self._insecure:
+                        logger.warning('using insecure (unverified TLS) connection for %s://%s%s' %
+                                       (url_protocol, url_host, url_path))
+                        response = sess.get('%s://%s%s' % (url_protocol, url_host,
+                                                           url_path),
+                                            allow_redirects=False, stream=True,
+                                            timeout=self._connect_timeout,
+                                            verify=False)
+                    else:
+                        try:
+                            response = sess.get('%s://%s%s' % (url_protocol, url_host,
+                                                               url_path),
+                                                allow_redirects=False, stream=True,
+                                                timeout=self._connect_timeout,
+                                                verify=True)
+                        except requests.exceptions.SSLError as e:
+                            self._insecure = True
+                            logger.warning('TLS certificate verification failed for %s://%s%s: %s - using insecure fallback for this feed' %
+                                           (url_protocol, url_host, url_path, e))
+                            response = sess.get('%s://%s%s' % (url_protocol, url_host,
+                                                               url_path),
+                                                allow_redirects=False, stream=True,
+                                                timeout=self._connect_timeout,
+                                                verify=False)
 
                     errcode = response.status_code
                     errmsg = response.reason
@@ -1155,16 +986,10 @@ class RSS_Resource:
 
                         self._last_modified, self._etag = parse_Rfc822DateTime(headers.get('last-modified', None)), headers.get('etag', None)
 
-                        # only use an encoding if it has been explicitly specified
-                        charset = list(filter(lambda s: s.startswith('charset='), [ s.strip() for s in headers.get('content-type', '').split(';')[1:] ]))[:1]
-                        if charset:
-                            encoding = charset[0][len('charset='):]
-                        else:
-                            encoding = None
+                        rss_parser = FeedParser((self._url_protocol,
+                                                 self._url_host,
+                                                 self._url_path))
 
-                        rss_parser = Feed_Parser((self._url_protocol, self._url_host, self._url_path), encoding)
-
-                        bytes_received = 0
                         bytes_processed = 0
                         xml_started = False
                         file_hash = hashlib.md5()
@@ -1194,11 +1019,11 @@ class RSS_Resource:
                         else:
                             error_log = rss_parser.get_error_log()
                             if error_log:
-                                logger.warning('XML parser error log:\n%s' % (error_log,))
+                                logger.warning('feed parser error log:\n%s' % (error_log,))
 
                             new_channel_info = normalize_obj(rss_parser.get_info())
 
-                            hash_buffer = buffer(file_hash.digest())
+                            hash_buffer = file_hash.digest()
                             cursor.execute('UPDATE resource SET hash=? WHERE rid=? AND (hash IS NULL OR hash<>?)',
                                            (hash_buffer, self._id, hash_buffer))
                             feed_xml_changed = (cursor.rowcount != 0)
@@ -1509,15 +1334,6 @@ def RSS_Resource_simplify(url):
 
 
 if __name__ == '__main__':
-    import locale, sys
-
-    if sys.version_info[0] == 2:
-        encoding = locale.getlocale()[1]
-        if not encoding:
-            encoding = 'us-ascii'
-        sys.stdout = codecs.getwriter(encoding)(sys.stdout, errors='replace')
-        sys.stderr = codecs.getwriter(encoding)(sys.stderr, errors='replace')
-
     logger = logging.getLogger()
     logger.addHandler(logging.StreamHandler())
     logger.setLevel(logging.DEBUG)

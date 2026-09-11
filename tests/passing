@@ -1,0 +1,42 @@
+#!/usr/bin/env python3
+import os
+import sys
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), os.pardir))
+
+from jabrssng import (
+    Cursor,
+    FlexibleLocker,
+    JabRSSStream,
+    JabberUser,
+    get_db,
+    ensure_databases,
+)
+
+failures = 0
+
+
+def check(name, cond):
+    global failures
+    try:
+        cond()
+    except Exception as e:
+        failures += 1
+        print('FAIL %-30s %s' % (name, e))
+        return
+    print('ok   %s' % (name,))
+
+
+check('imports + module-level no-idle boot', lambda: None)
+check('ensure_databases defined', lambda: callable(ensure_databases))
+check('get_db/get_db defined', lambda: callable(get_db))
+check('Cursor defined', lambda: callable(Cursor))
+check('FlexibleLocker defined', lambda: callable(FlexibleLocker))
+check('JabRSSStream defined', lambda: callable(JabRSSStream))
+check('JabberUser defined', lambda: callable(JabberUser))
+check('send_frontend defined', lambda: hasattr(JabRSSStream, 'send_frontend'))
+
+
+if __name__ == '__main__':
+    print('failures=%d' % failures)
+    sys.exit(1 if failures else 0)
