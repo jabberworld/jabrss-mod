@@ -49,6 +49,14 @@ class DeliveryMixin:
         elif typ in ('normal', 'chat'):
             try:
                 user, jid_resource = ctx.storage.get_user(sender)
+            except KeyError:
+                # user is not in the cache (e.g. after a reconnect):
+                # try to load from the database, but do not create a
+                # new user if it does not exist there either
+                user, jid_resource = ctx.storage.load_user(sender, None)
+            if user is None:
+                return
+            try:
                 unknown_msg = False
 
                 if body == 'help' or body == '?':
