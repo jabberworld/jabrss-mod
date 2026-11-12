@@ -82,6 +82,7 @@ class JabRSSStream(UpdaterMixin, RosterMixin, DeliveryMixin, ChatCommandMixin,
         self.plugin['xep_0092'].os = ('Python %d.%d.%d + slixmpp %s' %
                                       (sys.version_info[:3] + (slixmpp_version.__version__,)))
         self.register_plugin('xep_0199')      # ping
+        self.register_plugin('xep_0439')      # quick response
 
         # only activate our own presence subscription handling
         self.auto_authorize = None
@@ -89,6 +90,7 @@ class JabRSSStream(UpdaterMixin, RosterMixin, DeliveryMixin, ChatCommandMixin,
 
         for event, handler in (('session_start', self.session_start),
                                ('message', self.message),
+                               ('action_selected', self._process_action_selected),
                                ('presence', self.presence),
                                ('roster_update', self.roster_update_event),
                                ('session_bind', self._on_session_bind),
@@ -294,6 +296,21 @@ class JabRSSStream(UpdaterMixin, RosterMixin, DeliveryMixin, ChatCommandMixin,
     def _reply(self, stanza, body):
         reply = self.make_message(mto=stanza['from'], mtype=stanza['type'],
                                   msubject=stanza['subject'], mbody=body)
+        self._send_stanza(reply)
+
+
+    def _reply_with_actions(self, stanza, body, actions):
+        reply = self.make_message(mto=stanza['from'], mtype=stanza['type'],
+                                  msubject=stanza['subject'])
+        lang = self.default_lang
+        reply['body|%s' % lang] = body
+        action_cls = self.plugin['xep_0439'].stanza.Action
+        for action_id, label in actions:
+            action = action_cls()
+            action['lang'] = lang
+            action['id'] = action_id
+            action['label'] = label
+            reply.append(action)
         self._send_stanza(reply)
 
 

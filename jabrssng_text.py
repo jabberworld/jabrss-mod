@@ -29,6 +29,23 @@ TEXT_NEWUSER = '''
 
 Now there is only one more thing to do before you can use JabRSS: you have to authorize the presence subscription request from JabRSS. This is necessary so that JabRSS knows your presence status and only sends you RSS headlines when you are online.'''
 
+# XEP-0439 Quick Response actions attached to the help message
+# (pairs of action id and label)
+HELP_ACTIONS = [
+    ('list', 'List'),
+    ('conf', 'Conf'),
+    ('stats', 'Stat'),
+    ('usage', 'Usage'),
+]
+
+# action id -> command text used when the action is selected
+ACTION_COMMANDS = {
+    'list': 'list',
+    'conf': 'conf',
+    'stats': 'stats',
+    'usage': 'usage',
+}
+
 TEXT_HELP = '''\
 Supported commands:
 

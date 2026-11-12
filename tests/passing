@@ -12,6 +12,7 @@ from jabrssng import (
     get_db,
     ensure_databases,
 )
+from jabrssng_text import HELP_ACTIONS, ACTION_COMMANDS
 
 failures = 0
 
@@ -35,6 +36,15 @@ check('FlexibleLocker defined', lambda: callable(FlexibleLocker))
 check('JabRSSStream defined', lambda: callable(JabRSSStream))
 check('JabberUser defined', lambda: callable(JabberUser))
 check('send_frontend defined', lambda: hasattr(JabRSSStream, 'send_frontend'))
+
+
+def _check_help_actions():
+    ids = set(action_id for action_id, _label in HELP_ACTIONS)
+    assert ids == set(['list', 'conf', 'stats', 'usage']), ids
+    assert all(ACTION_COMMANDS.get(action_id) == action_id for action_id in ids)
+
+
+check('help quick-response actions', _check_help_actions)
 
 
 if __name__ == '__main__':

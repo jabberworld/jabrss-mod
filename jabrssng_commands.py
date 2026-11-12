@@ -28,12 +28,12 @@ from parserss import UrlError
 
 from jabrssng_context import log_message
 from jabrssng_db import Cursor
-from jabrssng_text import TEXT_HELP
+from jabrssng_text import TEXT_HELP, HELP_ACTIONS
 
 
 class ChatCommandMixin:
     def _process_help(self, stanza, user):
-        self._reply(stanza, TEXT_HELP)
+        self._reply_with_actions(stanza, TEXT_HELP, HELP_ACTIONS)
 
     def _process_list(self, stanza, user):
         reply_body = []

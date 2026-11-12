@@ -29,7 +29,7 @@ from slixmpp import JID
 import jabrssng_context as ctx
 
 from jabrssng_context import log_message
-from jabrssng_text import TEXT_WELCOME, TEXT_NEWUSER
+from jabrssng_text import TEXT_WELCOME, TEXT_NEWUSER, ACTION_COMMANDS
 
 
 MAX_MESSAGE_SIZE = 20000
@@ -43,7 +43,19 @@ class DeliveryMixin:
 
         body = body.strip()
         log_message('message', typ, str(sender), body)
+        self._dispatch_message(stanza, typ, sender, body)
 
+    def _process_action_selected(self, msg):
+        # XEP-0439 quick response: an action selection arrives in a
+        # message without a body; map the action id back to a command
+        action_id = msg['action_selected']['id']
+        body = ACTION_COMMANDS.get(action_id)
+        log_message('action selected', str(msg['from']), str(action_id))
+        if body is None:
+            return
+        self._dispatch_message(msg, msg['type'], msg['from'], body)
+
+    def _dispatch_message(self, stanza, typ, sender, body):
         if sender.user == '':
             log_message('ignoring server message from', str(sender))
         elif typ in ('normal', 'chat'):
