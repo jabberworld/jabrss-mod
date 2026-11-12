@@ -223,7 +223,7 @@ CLI-опции: `-c/--config`, `-f/--password-file` (пароль из перв�
 
 Маршрутизация команд выполняется в `DeliveryMixin.message` по префиксам (см. 4.7). Здесь — реализация `_process_*`:
 
-- `_process_help` — отвечает `TEXT_HELP`.
+- `_process_help` — отвечает `TEXT_HELP` через `_reply_with_actions`, прикрепляя кнопки быстрых действий XEP-0439 (`HELP_ACTIONS`: `list`, `conf`, `stats`, `usage`).
 - `_process_list` — перечисляет подписки пользователя, отсортированные; при ошибке ресурса добавляет ` (Error: ...)` либо ` (error)`. Пусто → «Sorry, you are currently not subscribed to any RSS feeds.»
 - `_process_set(stanza, user, argstr)`:
   - `plaintext`/`headline`/`chat` → `set_message_type`.
@@ -241,9 +241,12 @@ CLI-опции: `-c/--config`, `-f/--password-file` (пароль из перв�
 
 ### 4.7 Доставка и presence (`DeliveryMixin`)
 
-`message(stanza)`:
+`message(stanza)` — извлекает `type/from/body`; если `type` пуст или `body` пуст — игнор; иначе логирует и передаёт в `_dispatch_message(stanza, typ, sender, body)` (общая диспетчеризация для обычных сообщений и XEP-0439).
 
-- Если `type` пуст или `body` пуст — игнор. Логирует.
+`_process_action_selected(msg)` — обработчик события `action_selected` (XEP-0439): сообщение без `<body>` с `<action-selected id="..."/>`. По `ACTION_COMMANDS` id отображается в текст команды и передаётся в `_dispatch_message`; неизвестный id игнорируется (логируется). Обычный `message()` такое сообщение отбрасывает (body пуст), затем плагин эмитит событие — двойной обработки нет.
+
+`_dispatch_message(stanza, typ, sender, body)`:
+
 - `sender.user == ''` (доменный адрес) — игнор.
 - типы `normal`/`chat`: сначала `get_user`; при `KeyError` — fallback на `load_user(sender, None)` (загрузка из БД, без создания нового). Если пользователь не найден (`None`) — выход. Диспетчер команд по префиксам (`help`/`?`, `list`, `set `, `configuration`/`conf`, `stats`/`statistics`/`show statistics`, `usage`/`show usage`, `subscribe `/`add `/`+ `, `unsubscribe `/`del `/`- `, `info `). Неизвестная команда → не более 2 предупреждений на пользователя (защита от пинг-понга роботов).
 - тип `headline` — молча игнор (чтобы не отвечать на собственные headline-сообщения).
@@ -276,7 +279,7 @@ CLI-опции: `-c/--config`, `-f/--password-file` (пароль из перв�
 - Тип 1 (headline): для каждого элемента — отдельное headline-сообщение с OOB (`jabber:x:oob`, url+desc). Subject = subject_format.
 - `_format_header(title, url, res_url, format)`: format 1=title, 2=url, 3=`title: url`, иначе пусто.
 
-`_reply(stanza, body)` и `_send_stanza(stanza)` находятся в `jabrssng_stream.py` (см. 4.10).
+`_reply(stanza, body)`, `_reply_with_actions(stanza, body, actions)` и `_send_stanza(stanza)` находятся в `jabrssng_stream.py` (см. 4.10).
 
 ### 4.8 Ростер-реконсиляция (`RosterMixin`)
 
@@ -337,9 +340,9 @@ CLI-опции: `-c/--config`, `-f/--password-file` (пароль из перв�
 - инициализирует очередь обновлений и condition;
 - monkey-patch: `RSS_Resource.schedule_update = self.schedule_update` (патчит глобально — планирование идёт через бота);
 - настраивает SCRAM: отключает `*-PLUS` механизмы (`use_mechs` — список, не set; иначе игнорируется; необходимо для строгих серверов, отклоняющих channel binding);
-- регистрирует плагины `xep_0030` (disco), `xep_0092` (version), `xep_0199` (ping);
+- регистрирует плагины `xep_0030` (disco), `xep_0092` (version), `xep_0199` (ping), `xep_0439` (quick response);
 - `auto_authorize = None`, `auto_subscribe = False` — только собственная presence-обработка;
-- вешает event-хендлеры: `session_start`, `message`, `presence`, `roster_update`, `session_bind`, `auth_success`, `connected`, `disconnected`, `failed_auth`, `failed_all_auth`, `no_auth`;
+- вешает event-хендлеры: `session_start`, `message`, `action_selected`, `presence`, `roster_update`, `session_bind`, `auth_success`, `connected`, `disconnected`, `failed_auth`, `failed_all_auth`, `no_auth`;
 - `iq get/set` fallback-хендлеры через `Callback`/`StanzaPath`;
 - SRV: `tls_services = {'xmpps-client'}` (direct TLS), `starttls_services = {'xmpp-client'}` (STARTTLS).
 
@@ -365,7 +368,7 @@ CLI-опции: `-c/--config`, `-f/--password-file` (пароль из перв�
 
 `_ping_keepalive()` / `_ping_done(future)` — пингует бот-домен через `xep_0199` с таймаутом 30с; при `IqTimeout` — «ping timeout» и `transport.close()`.
 
-`_reply(stanza, body)` — отвечает тем же типом и subject; `_send_stanza(stanza)` — отправка из main-потока напрямую, из других потоков — через `call_soon_threadsafe`.
+`_reply(stanza, body)` — отвечает тем же типом и subject; `_reply_with_actions(stanza, body, actions)` — то же самое, но с телом `xml:lang` (`default_lang`) и элементами `<action xmlns="urn:xmpp:tmp:quick-response" id=... label=.../>` (XEP-0439, быстрые действия); `_send_stanza(stanza)` — отправка из main-потока напрямую, из других потоков — через `call_soon_threadsafe`.
 
 IQ-fallback (`iq_get_fallback`/`iq_set_fallback`):
 
@@ -390,7 +393,7 @@ IQ-fallback (`iq_get_fallback`/`iq_set_fallback`):
 
 ### 4.12 UI-тексты (`jabrssng_text.py`)
 
-`TEXT_WELCOME`, `TEXT_NEWUSER`, `TEXT_HELP` — статические сообщения (приветствие, инструкция подписки, список поддерживаемых команд).
+`TEXT_WELCOME`, `TEXT_NEWUSER`, `TEXT_HELP` — статические сообщения (приветствие, инструкция подписки, список поддерживаемых команд). `HELP_ACTIONS` — пары `(id, label)` кнопок быстрых действий для справки (`list`/`List`, `conf`/`Conf`, `stats`/`Stat`, `usage`/`Usage`); `ACTION_COMMANDS` — отображение id действия XEP-0439 в текст команды.
 
 ---
 
@@ -500,7 +503,7 @@ IQ-fallback (`iq_get_fallback`/`iq_set_fallback`):
 
 | Команда (синонимы) | Действие |
 |---|---|
-| `help` / `?` | Список команд (`TEXT_HELP`). |
+| `help` / `?` | Список команд (`TEXT_HELP`) + кнопки быстрых действий XEP-0439 (`List`, `Conf`, `Stat`, `Usage`). |
 | `subscribe <url>` / `add <url>` / `+ <url>` | Подписка на фид; сразу доставляет текущие новые заголовки. |
 | `unsubscribe <url>` / `del <url>` / `- <url>` | Отписка. |
 | `list` | Список подписок (с пометками `(error)`/`(Error: ...)`). |

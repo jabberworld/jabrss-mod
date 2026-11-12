@@ -26,9 +26,9 @@ JabRSS is an XMPP-based RSS/Atom feed aggregator and notification bot. It monito
 | Entry Point | Purpose |
 |---|---|
 | `jabrssng.py` | Facade/entry point: parses config, initialises the context, builds `JabRSSStream`, starts the XMPP loop and the updater/console threads, and runs the shutdown sequence. Also re-exports `Cursor`, `FlexibleLocker`, `JabRSSStream`, `JabberUser`, `get_db`, `ensure_databases` for the offline test suite. Importing it is side-effect free (`main()` does all the work). |
-| `jabrssng_stream.py` | `JabRSSStream` (composed from the mixins below + `slixmpp.ClientXMPP`): connection/SRV resolution, auth, reconnects, keepalive, IQ fallbacks (`jabber:iq:time`/`last`/`urn:xmpp:time`), `session_start` and presence status. |
-| `jabrssng_commands.py` | `ChatCommandMixin`: the user-facing commands (`help`, `list`, `set`, `configuration`, `statistics`, `usage`, `subscribe`, `unsubscribe`, `info`). |
-| `jabrssng_delivery.py` | `DeliveryMixin`: the `message`/`presence` stub handlers (message falls back to `load_user` when `get_user` cache-misses), subscription presence flows, `_send_headlines` message formatting (plaintext/chat/headline + OOB). |
+| `jabrssng_stream.py` | `JabRSSStream` (composed from the mixins below + `slixmpp.ClientXMPP`): connection/SRV resolution, auth, reconnects, keepalive, IQ fallbacks (`jabber:iq:time`/`last`/`urn:xmpp:time`), `session_start` and presence status. Registers `xep_0439` and provides `_reply`/`_reply_with_actions`/`_send_stanza`. |
+| `jabrssng_commands.py` | `ChatCommandMixin`: the user-facing commands (`help`, `list`, `set`, `configuration`, `statistics`, `usage`, `subscribe`, `unsubscribe`, `info`). `help` attaches XEP-0439 quick-action buttons. |
+| `jabrssng_delivery.py` | `DeliveryMixin`: the `message`/`presence` stub handlers (message falls back to `load_user` when `get_user` cache-misses), the XEP-0439 `action_selected` handler, subscription presence flows, `_send_headlines` message formatting (plaintext/chat/headline + OOB). |
 | `jabrssng_roster.py` | `RosterMixin`: server-roster reconciliation (`roster_update_event`), user deletion incl. the removal grace period (`_delete_user_after_grace`). |
 | `jabrssng_updater.py` | `UpdaterMixin`: the feed-polling update queue (`schedule_update`, `run`, `_update_resource`), running in a separate thread. |
 | `jabrssng_user.py` | `JabberUser` / `DummyJabberUser` entity, `strip_resource`, `get_week_nr`. |
@@ -36,7 +36,7 @@ JabRSS is an XMPP-based RSS/Atom feed aggregator and notification bot. It monito
 | `jabrssng_db.py` | `Cursor`, `FlexibleLocker`, `get_db`, `ensure_databases`, `_ensure_pending_removal_column`. |
 | `jabrssng_context.py` | The global singletons (`db`, `db_sync`, `main_res_db`, `storage`, `dummy_user`) and `init_context()`. See "Global State". |
 | `jabrssng_config.py` | CLI/config parsing (`read_config`, precedence command line > config file > prompt) and `TEXT_USAGE`. |
-| `jabrssng_text.py` | `TEXT_WELCOME`, `TEXT_NEWUSER`, `TEXT_HELP`. |
+| `jabrssng_text.py` | `TEXT_WELCOME`, `TEXT_NEWUSER`, `TEXT_HELP`, plus `HELP_ACTIONS` / `ACTION_COMMANDS` for XEP-0439 quick actions. |
 | `jabrssng_console.py` | Interactive console handler (debug commands, shutdown). |
 | `parserss.py` | RSS/Atom feed parser, fetcher, and resource manager. Handles HTTP fetching (`requests`), parsing (`feedparser`), item comparison/caching, adaptive polling intervals, and SQLite storage. |
 | `jabrss.conf` / `jabrss.conf.example` | INI configuration of the bot (JID, password, host, resource, user_agent). See "Running". |
@@ -109,6 +109,10 @@ Both `Cursor` classes implement manual transaction management (`BEGIN`/`COMMIT`)
 ### URL Validation
 
 `split_url()` in `parserss.py` restricts URLs to http (port 80) and https (port 443) only. Non-standard ports are rejected with `UrlError`. Private/local IPs are also rejected.
+
+### Quick Response (XEP-0439)
+
+The `xep_0439` plugin is registered in `JabRSSStream.__init__`. The `help` reply is sent via `_reply_with_actions()`, which sets the body language (`default_lang`) and appends `<action xmlns="urn:xmpp:tmp:quick-response" id=... label=.../>` elements from `HELP_ACTIONS` (`list`, `conf`, `stats`, `usage` walled as `List`/`Conf`/`Stat`/`Usage`). When a client selects an action it sends a body-less message with `<action-selected id="..."/>`; the plugin emits the `action_selected` event, handled by `DeliveryMixin._process_action_selected()`, which maps the id to a command via `ACTION_COMMANDS` and feeds it to the shared `_dispatch_message()`. A normal `message()` ignores the body-less stanza, so the action is processed exactly once. Keep the plaintext help body listing the same commands (XEP business rule: functionality must remain available without client support).
 
 ### Configuration Bitflags
 
